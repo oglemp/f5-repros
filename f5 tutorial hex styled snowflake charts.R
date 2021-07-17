@@ -6,12 +6,10 @@ library(prismatic)
 library(extrafont)
 library(teamcolors)
 library(cowplot)
-library(plyr)
 
 # custom theme
 theme_owen <- function () {
-  theme_minimal(base_size = 11, base_family = "Consolas")
-%+replace%
+  theme_minimal(base_size = 11, base_family = "Consolas") %+replace%
   theme(
     panel.grid.minor = element_blank(),
     plot.background = element_rect(fill = 'floralwhite',
@@ -23,7 +21,7 @@ color = 'floralwhite')
 tms <- nba_teams()
 tms <- tms %>% 
   filter(isNonNBATeam == 0) %>% 
-  select(teamName, slugTeam)
+  select(nameTeam, slugTeam)
 
 #get NBA team colors
 tm.colors <- teamcolors
@@ -69,7 +67,7 @@ df <- df %>%
 #transform the location to fit the dimensions of the court, rename variables
 df <- df %>% 
   mutate(locationX = as.numeric(as.character(locationX)) / 10,
-         locationY = as.numeric(as.character(locationY)) / 10 + hoop_center_Y) %>% 
+         locationY = as.numeric(as.character(locationY)) / 10 + hoop_center_y) %>% 
   rename("loc_x" = "locationX",
          "loc_y" = "locationY")
 
@@ -127,17 +125,17 @@ df <- mutate(df, hexbin_id = hb@cID)
 #find the league average % of shots coming from each hex
 la <- df %>% 
   group_by(hexbin_id) %>% 
-  dplyr::summarize(hex_attempts = n()) %>% 
+  summarize(hex_attempts = n()) %>% 
   ungroup() %>% 
   mutate(hex_pct = hex_attempts / sum(hex_attempts, na.rm = TRUE)) %>% 
   ungroup() %>% 
-  dplyr::rename("League Average" = "hex_attempts") %>% 
+  rename("league_average" = "hex_pct") %>% 
   select(-hex_attempts)
 
 #Calculate the % of shots coming from each hex for each team
 hexbin_stats <- df %>% 
   group_by(hexbin_id, nameTeamOffense) %>% 
-  dplyr::summarize(hex_attempts = n()) %>% 
+  summarize(hex_attempts = n()) %>% 
   ungroup() %>% 
   group_by(nameTeamOffense) %>% 
   mutate(hex_pct = hex_attempts / sum(hex_attempts, na.rm = TRUE)) %>% 
@@ -156,4 +154,68 @@ sx <- hb@xbins / diff(hb@xbnds)
 sy <- (hb@xbins * hb@shape) / diff(hb@ybnds)
 dx <- 1 / (2 * sx)
 dy <- 1 / (2 * sqrt(3) * sy)
-origin_coords <- hexcoord
+origin_coords <- hexcoords(dx, dy)
+
+hex_centers <- hcell2xy(hb)
+
+hexbin_coords <- bind_rows(lapply(1:hb@ncells, function(i) {
+  data.frame(
+    x = origin_coords$x + hex_centers$x[i],
+    y = origin_coords$y + hex_centers$y[i],
+    center_x = hex_centers$x[i],
+    center_y = hex_centers$y[i],
+    hexbin_id = hb@cell[i]
+  )
+}))
+
+#merge our hexbin coordinates with our hexbin stats
+hex_data <- inner_join(hexbin_coords, hexbin_stats, by = "hexbin_id")
+
+#adjust the size of the hexagons
+hex_data <- hex_data %>% 
+  mutate( radius_factor = .99,
+          adj_x = center_x + radius_factor * (x-center_x),
+          adj_y = center_y + radius_factor * (y-center_y))
+
+# merge with tms data so that we can have the abbreviated name
+hex_data <- left_join(hex_data, tms, by = c('nameTeamOffense' = 'nameTeam'))
+
+# merge with team colors
+hex_data <- left_join(hex_data, tm.colors, by = c("nameTeamOffense" = "name"))
+
+#min 10 attempts and z-xcore >= 0
+hex_data <- hex_data %>% 
+  filter(hex_attempts >= 10 & hex_data$z_score > 0)
+
+p <- ggplot() +
+  geom_polygon(data = hex_data,
+               aes(x=adj_x, y = adj_y, alpha = sqrt(z_score),
+fill = primary, color = after_scale(clr_darken(fill, 0.3)), group = hexbin_id), 
+size = .25) + 
+  theme_owen() + 
+  facet_wrap(~slugTeam, nrow = 5, strip.position = 'top' ) +
+  scale_alpha_continuous(range = c(0.5, 1)) +
+  scale_fill_identity() +
+  theme(legend.position = 'none',
+        line = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.spacing = unit(-.25, "lines"),
+        plot.title = element_text(face = 'bold', hjust = 0.5, size = 15, color = 'black', family = "Consolas"),
+        plot.caption = element_text(size = 6, hjust = 0.5, color = 'black', family = "Consolas"),
+        strip.text = element_text(size = 8, vjust = -1, face = 'bold', family = "Consolas")) +
+  scale_y_continuous(limits = c(-2.5, 42)) +
+  scale_x_continuous(limits = c(-30, 30)) +
+  coord_fixed(clip = "off") +
+  labs(title = "Where Teams Like To Shoot From\nRelative To League Average",
+       caption = "Darker and denser areas indicate a team takes more shots from that spot relative to the league as a whole") +
+  geom_path(data = court_points,
+            aes (x = x, y = y, group = desc, linetype = dash),
+            color = "black", size = .25)
+
+p <- ggdraw(p) +
+  theme(plot.background = element_rect(fill="floralwhite", color = NA))
+
+ggsave("HexChart.png", p, width = 6, height = 6, dpi = 300, type = 'cairo')
